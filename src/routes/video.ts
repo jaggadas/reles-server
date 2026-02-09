@@ -2,6 +2,7 @@ import { Router } from "express";
 import { searchRecipeVideos, fetchTranscript } from "../lib/serpapi";
 import { getVideoDetails } from "../lib/composio";
 import { getRecipeExtractor } from "../lib/llm-providers";
+import { getCachedRecipe, cacheRecipe } from "../lib/firestore-cache";
 
 const router = Router();
 
@@ -89,6 +90,13 @@ router.get("/:videoId/extract", async (req, res) => {
   const { videoId } = req.params;
 
   try {
+    // Check Firestore cache first
+    const cached = await getCachedRecipe(videoId);
+    if (cached) {
+      res.json(cached);
+      return;
+    }
+
     const details = await getVideoDetails(videoId);
 
     // Step 1: Fetch transcript from SerpApi
@@ -131,7 +139,7 @@ router.get("/:videoId/extract", async (req, res) => {
       return;
     }
 
-    res.json({
+    const result = {
       title: recipeTitle,
       videoTitle: details.title,
       ingredients,
@@ -144,7 +152,14 @@ router.get("/:videoId/extract", async (req, res) => {
       difficulty,
       cuisine,
       accompanyingRecipes,
-    });
+    };
+
+    // Cache in Firestore for future dedup
+    cacheRecipe(videoId, result).catch((err) =>
+      console.error("Failed to cache recipe:", err)
+    );
+
+    res.json(result);
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Failed to extract recipe";

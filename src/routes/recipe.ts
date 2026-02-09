@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { getComposioClient } from "../lib/composio";
+import { incrementTimesMade, getPopularRecipes } from "../lib/firestore-cache";
 
 interface IngredientInput {
   name: string;
@@ -170,6 +171,31 @@ router.post("/instacart", async (req, res) => {
     }
 
     res.status(500).json({ error: "Failed to create Instacart link" });
+  }
+});
+
+// POST /api/recipe/:videoId/made
+router.post("/:videoId/made", async (req, res) => {
+  const { videoId } = req.params;
+
+  try {
+    const timesMade = await incrementTimesMade(videoId);
+    res.json({ timesMade });
+  } catch (error) {
+    console.error("Increment times made error:", error);
+    res.status(500).json({ error: "Failed to update recipe" });
+  }
+});
+
+// GET /api/recipe/popular
+router.get("/popular", async (req, res) => {
+  const limit = Math.min(Number(req.query.limit) || 10, 50);
+  try {
+    const recipes = await getPopularRecipes(limit);
+    res.json({ recipes });
+  } catch (error) {
+    console.error("Get popular recipes error:", error);
+    res.status(500).json({ error: "Failed to fetch popular recipes" });
   }
 });
 
