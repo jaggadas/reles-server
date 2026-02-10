@@ -3,6 +3,7 @@ import bcrypt from "bcrypt";
 import { v4 as uuidv4 } from "uuid";
 import { db } from "../lib/firebase";
 import { signToken, requireAuth } from "../middleware/auth";
+import { getCurrentWeekStart } from "../lib/week";
 import type { AuthRequest, UserDocument } from "../lib/auth-types";
 
 const router = Router();
@@ -39,6 +40,8 @@ router.post("/register", async (req, res) => {
       name,
       passwordHash,
       preferences: null,
+      trial: null,
+      weeklyExtractions: { count: 0, weekStart: getCurrentWeekStart() },
       createdAt: now,
       updatedAt: now,
     };

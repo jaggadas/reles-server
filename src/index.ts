@@ -7,6 +7,7 @@ import recipeRoutes from "./routes/recipe";
 import groceryRoutes from "./routes/grocery";
 import authRoutes from "./routes/auth";
 import userRoutes from "./routes/user";
+import subscriptionRoutes from "./routes/subscription";
 import { requireAuth } from "./middleware/auth";
 
 const app = express();
@@ -23,6 +24,7 @@ app.use("/api/user", requireAuth, userRoutes);
 app.use("/api/video", requireAuth, videoRoutes);
 app.use("/api/recipe", requireAuth, recipeRoutes);
 app.use("/api/grocery", requireAuth, groceryRoutes);
+app.use("/api/subscription", requireAuth, subscriptionRoutes);
 
 app.get("/health", (_req, res) => {
   res.json({ status: "ok" });

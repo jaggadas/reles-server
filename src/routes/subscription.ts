@@ -1,0 +1,240 @@
+import { Router } from "express";
+import { db } from "../lib/firebase";
+import { getCurrentWeekStart } from "../lib/week";
+import type { AuthRequest, UserDocument } from "../lib/auth-types";
+
+const router = Router();
+
+const FREE_WEEKLY_LIMIT = 2;
+const PRO_WEEKLY_LIMIT = 10;
+const TRIAL_RECIPE_LIMIT = 10;
+const TRIAL_DURATION_DAYS = 7;
+
+function isTrialActive(user: UserDocument): boolean {
+  if (!user.trial) return false;
+  const start = new Date(user.trial.startDate);
+  const now = new Date();
+  const daysPassed = (now.getTime() - start.getTime()) / (1000 * 60 * 60 * 24);
+  return daysPassed < TRIAL_DURATION_DAYS && user.trial.recipesUsed < TRIAL_RECIPE_LIMIT;
+}
+
+/** Auto-reset weekly count if the week has rolled over. Returns the effective data. */
+function resolveWeeklyData(user: UserDocument): { count: number; weekStart: string } {
+  const currentWeek = getCurrentWeekStart();
+  if (!user.weeklyExtractions || user.weeklyExtractions.weekStart !== currentWeek) {
+    return { count: 0, weekStart: currentWeek };
+  }
+  return user.weeklyExtractions;
+}
+
+// GET /api/subscription/status
+router.get("/status", async (req: AuthRequest, res) => {
+  try {
+    const doc = await db.collection("users").doc(req.uid!).get();
+    if (!doc.exists) {
+      res.status(404).json({ error: "User not found" });
+      return;
+    }
+
+    const user = doc.data() as UserDocument;
+    const weekly = resolveWeeklyData(user);
+    const trialOn = isTrialActive(user);
+
+    // Persist the weekly reset if week rolled over
+    if (
+      !user.weeklyExtractions ||
+      user.weeklyExtractions.weekStart !== weekly.weekStart
+    ) {
+      await db.collection("users").doc(req.uid!).update({
+        weeklyExtractions: weekly,
+      });
+    }
+
+    const trialRemaining = user.trial
+      ? Math.max(0, TRIAL_RECIPE_LIMIT - user.trial.recipesUsed)
+      : 0;
+
+    res.json({
+      trial: user.trial ?? null,
+      weeklyExtractions: weekly,
+      trialActive: trialOn,
+      trialRemaining,
+      weeklyRemaining: Math.max(0, FREE_WEEKLY_LIMIT - weekly.count),
+      proWeeklyRemaining: Math.max(0, PRO_WEEKLY_LIMIT - weekly.count),
+    });
+  } catch (error) {
+    console.error("Subscription status error:", error);
+    res.status(500).json({ error: "Failed to fetch subscription status" });
+  }
+});
+
+// POST /api/subscription/activate-trial
+router.post("/activate-trial", async (req: AuthRequest, res) => {
+  try {
+    const doc = await db.collection("users").doc(req.uid!).get();
+    if (!doc.exists) {
+      res.status(404).json({ error: "User not found" });
+      return;
+    }
+
+    const user = doc.data() as UserDocument;
+
+    if (user.trial) {
+      res.json({ alreadyActive: true, trial: user.trial });
+      return;
+    }
+
+    const trial = {
+      startDate: new Date().toISOString(),
+      recipesUsed: 0,
+    };
+
+    await db.collection("users").doc(req.uid!).update({
+      trial,
+      updatedAt: new Date().toISOString(),
+    });
+
+    res.json({
+      alreadyActive: false,
+      trial,
+      trialActive: true,
+      trialRemaining: TRIAL_RECIPE_LIMIT,
+    });
+  } catch (error) {
+    console.error("Activate trial error:", error);
+    res.status(500).json({ error: "Failed to activate trial" });
+  }
+});
+
+// POST /api/subscription/use-extraction
+router.post("/use-extraction", async (req: AuthRequest, res) => {
+  const { isPro } = req.body;
+
+  try {
+    const userRef = db.collection("users").doc(req.uid!);
+
+    const result = await db.runTransaction(async (tx) => {
+      const doc = await tx.get(userRef);
+      if (!doc.exists) throw new Error("User not found");
+
+      const user = doc.data() as UserDocument;
+      const weekly = resolveWeeklyData(user);
+      const trialOn = isTrialActive(user);
+
+      // Determine tier and check limits
+      if (isPro) {
+        if (weekly.count >= PRO_WEEKLY_LIMIT) {
+          return { allowed: false, remaining: 0, trialActive: trialOn, weeklyCount: weekly.count };
+        }
+        const newCount = weekly.count + 1;
+        tx.update(userRef, {
+          weeklyExtractions: { count: newCount, weekStart: weekly.weekStart },
+        });
+        return {
+          allowed: true,
+          remaining: Math.max(0, PRO_WEEKLY_LIMIT - newCount),
+          trialActive: trialOn,
+          weeklyCount: newCount,
+        };
+      }
+
+      if (trialOn) {
+        const newUsed = (user.trial!.recipesUsed || 0) + 1;
+        tx.update(userRef, {
+          "trial.recipesUsed": newUsed,
+          updatedAt: new Date().toISOString(),
+        });
+        const stillActive =
+          newUsed < TRIAL_RECIPE_LIMIT &&
+          (new Date().getTime() - new Date(user.trial!.startDate).getTime()) /
+            (1000 * 60 * 60 * 24) <
+            TRIAL_DURATION_DAYS;
+        return {
+          allowed: true,
+          remaining: Math.max(0, TRIAL_RECIPE_LIMIT - newUsed),
+          trialActive: stillActive,
+          weeklyCount: weekly.count,
+        };
+      }
+
+      // Free user
+      if (weekly.count >= FREE_WEEKLY_LIMIT) {
+        return { allowed: false, remaining: 0, trialActive: false, weeklyCount: weekly.count };
+      }
+      const newCount = weekly.count + 1;
+      tx.update(userRef, {
+        weeklyExtractions: { count: newCount, weekStart: weekly.weekStart },
+      });
+      return {
+        allowed: true,
+        remaining: Math.max(0, FREE_WEEKLY_LIMIT - newCount),
+        trialActive: false,
+        weeklyCount: newCount,
+      };
+    });
+
+    res.json(result);
+  } catch (error: any) {
+    if (error.message === "User not found") {
+      res.status(404).json({ error: "User not found" });
+      return;
+    }
+    console.error("Use extraction error:", error);
+    res.status(500).json({ error: "Failed to process extraction" });
+  }
+});
+
+// POST /api/subscription/migrate
+router.post("/migrate", async (req: AuthRequest, res) => {
+  const { trial, weeklyExtractions } = req.body;
+
+  try {
+    const doc = await db.collection("users").doc(req.uid!).get();
+    if (!doc.exists) {
+      res.status(404).json({ error: "User not found" });
+      return;
+    }
+
+    const user = doc.data() as UserDocument;
+
+    // Only migrate if user doesn't already have server-side data
+    if (user.trial !== undefined && user.weeklyExtractions !== undefined) {
+      // Fields already exist (either from registration or previous migration)
+      // Only skip if trial is already set (meaning data was already populated)
+      if (user.trial !== null || user.weeklyExtractions.count > 0) {
+        res.json({ migrated: false, reason: "already_migrated" });
+        return;
+      }
+    }
+
+    const updates: Record<string, unknown> = {
+      updatedAt: new Date().toISOString(),
+    };
+
+    if (trial && typeof trial.startDate === "string" && typeof trial.recipesUsed === "number") {
+      updates.trial = {
+        startDate: trial.startDate,
+        recipesUsed: Math.max(0, Math.floor(trial.recipesUsed)),
+      };
+    }
+
+    if (
+      weeklyExtractions &&
+      typeof weeklyExtractions.count === "number" &&
+      typeof weeklyExtractions.weekStart === "string"
+    ) {
+      updates.weeklyExtractions = {
+        count: Math.max(0, Math.floor(weeklyExtractions.count)),
+        weekStart: weeklyExtractions.weekStart,
+      };
+    }
+
+    await db.collection("users").doc(req.uid!).update(updates);
+    res.json({ migrated: true });
+  } catch (error) {
+    console.error("Migration error:", error);
+    res.status(500).json({ error: "Failed to migrate subscription data" });
+  }
+});
+
+export default router;
