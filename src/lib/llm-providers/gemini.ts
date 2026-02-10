@@ -44,6 +44,7 @@ function parseOutput(text: string): ExtractionOutput {
     difficulty: typeof parsed.difficulty === "number" ? parsed.difficulty : 1,
     cuisine: typeof parsed.cuisine === "string" ? parsed.cuisine : "OTHER",
     accompanying_recipes: Array.isArray(parsed.accompanying_recipes) ? parsed.accompanying_recipes : [],
+    highlights: Array.isArray(parsed.highlights) ? parsed.highlights as string[] : [],
   };
 }
 

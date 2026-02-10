@@ -21,7 +21,8 @@ Return ONLY a valid JSON object that strictly follows the schema below.
   "calories_kcal": 0,
   "difficulty": 1,
   "cuisine": "OTHER",
-  "accompanying_recipes": ["recipe name 1", "recipe name 2"]
+  "accompanying_recipes": ["recipe name 1", "recipe name 2"],
+  "highlights": ["short, catchy bullet 1", "bullet 2"]
 }
 
 Rules for servings:
@@ -81,6 +82,12 @@ Rules for accompanying_recipes:
 - Consider side dishes, appetizers, accompaniments, and desserts that match the cuisine
 - Each entry should be a short, searchable recipe name (2-4 words)
 - If no good pairings can be inferred, return []
+
+Rules for highlights:
+- Return 0-4 short bullet points (strings) about what stands out in this recipe
+- Focus on things like: very quick to make, one-pot meal, great for weeknights, good for meal prep, kid-friendly, high protein, etc.
+- Avoid repeating obvious facts already captured by servings or times unless truly noteworthy
+- Keep each highlight under 80 characters
 
 Return ONLY valid JSON. No markdown, explanations, or extra text.
 

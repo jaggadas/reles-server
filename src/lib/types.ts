@@ -45,6 +45,7 @@ export interface Recipe {
   difficulty?: number;
   cuisine?: CuisineCategory;
   accompanyingRecipes?: string[];
+  highlights?: string[];
 }
 
 export interface ExtractedRecipe {
@@ -60,6 +61,7 @@ export interface ExtractedRecipe {
   difficulty?: number;
   cuisine?: CuisineCategory;
   accompanyingRecipes?: string[];
+  highlights?: string[];
 }
 
 export interface VideoDetails {
@@ -73,6 +75,8 @@ export interface VideoSearchResult {
   channelName: string;
   thumbnail: string;
   url: string;
+   /** Total view count when available from the provider */
+  viewCount?: number;
 }
 
 export type ExtractionPhase = "idle" | "fetching" | "fetching-transcript" | "reading" | "extracting" | "success";

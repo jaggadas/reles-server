@@ -13,6 +13,7 @@ export interface ExtractionOutput {
   difficulty: number;
   cuisine: string;
   accompanying_recipes: string[];
+  highlights?: string[];
 }
 
 export interface RecipeExtractor {

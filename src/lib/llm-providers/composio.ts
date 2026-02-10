@@ -18,6 +18,7 @@ function parseOutput(stdout: string): ExtractionOutput {
     difficulty: typeof output.difficulty === "number" ? output.difficulty : 1,
     cuisine: typeof output.cuisine === "string" ? output.cuisine : "OTHER",
     accompanying_recipes: Array.isArray(output.accompanying_recipes) ? output.accompanying_recipes : [],
+    highlights: Array.isArray(output.highlights) ? output.highlights as string[] : [],
   };
 }
 

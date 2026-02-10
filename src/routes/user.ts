@@ -6,9 +6,14 @@ const router = Router();
 
 // PUT /api/user/preferences
 router.put("/preferences", async (req: AuthRequest, res) => {
-  const { likedCuisines, dietaryRestrictions, favoriteCategories } = req.body;
+  const {
+    likedCuisines,
+    dietaryRestrictions,
+    favoriteCategories,
+    allergens,
+  } = req.body;
 
-  if (!likedCuisines || !dietaryRestrictions || !favoriteCategories) {
+  if (!likedCuisines || !dietaryRestrictions || !favoriteCategories || !Array.isArray(allergens)) {
     res.status(400).json({ error: "All preference fields are required" });
     return;
   }
@@ -20,6 +25,7 @@ router.put("/preferences", async (req: AuthRequest, res) => {
       isVegan: !!dietaryRestrictions.isVegan,
     },
     favoriteCategories,
+    allergens: allergens.map((a: unknown) => String(a).toLowerCase()),
   };
 
   try {

@@ -133,6 +133,7 @@ router.get("/:videoId/extract", async (req, res) => {
     const difficulty = output.difficulty;
     const cuisine = output.cuisine;
     const accompanyingRecipes = output.accompanying_recipes;
+    const highlights = output.highlights ?? [];
 
     if (!Array.isArray(ingredients) || ingredients.length === 0) {
       res.status(400).json({ detail: "No ingredients could be extracted from this video." });
@@ -152,6 +153,7 @@ router.get("/:videoId/extract", async (req, res) => {
       difficulty,
       cuisine,
       accompanyingRecipes,
+      highlights,
     };
 
     // Cache in Firestore for future dedup

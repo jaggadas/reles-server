@@ -5,19 +5,18 @@ interface SerpApiResponse {
   error?: string;
 }
 
+interface SerpApiYouTubeVideoItem {
+  link?: string;
+  title?: string;
+  channel?: { name?: string };
+  thumbnail?: string | { static?: string };
+  /** Total view count for the video when available */
+  views?: number;
+}
+
 interface SerpApiYouTubeSearchResponse {
-  video_results?: Array<{
-    link?: string;
-    title?: string;
-    channel?: { name?: string };
-    thumbnail?: string | { static?: string };
-  }>;
-  ads_results?: Array<{
-    link?: string;
-    title?: string;
-    channel?: { name?: string };
-    thumbnail?: string | { static?: string };
-  }>;
+  video_results?: SerpApiYouTubeVideoItem[];
+  ads_results?: SerpApiYouTubeVideoItem[];
   error?: string;
 }
 
@@ -28,9 +27,7 @@ function extractVideoIdFromLink(link: string): string | null {
   return match?.[1] ?? null;
 }
 
-function parseVideoResult(
-  item: { link?: string; title?: string; channel?: { name?: string }; thumbnail?: string | { static?: string } }
-): VideoSearchResult | null {
+function parseVideoResult(item: SerpApiYouTubeVideoItem): VideoSearchResult | null {
   const link = item.link;
   if (!link) return null;
   const videoId = extractVideoIdFromLink(link);
@@ -42,6 +39,7 @@ function parseVideoResult(
     channelName: item.channel?.name ?? "",
     thumbnail,
     url: link,
+    viewCount: typeof item.views === "number" ? item.views : undefined,
   };
 }
 
