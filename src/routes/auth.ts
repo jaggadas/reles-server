@@ -66,6 +66,29 @@ router.post("/register", async (req, res) => {
   }
 });
 
+// POST /api/auth/check-email
+router.post("/check-email", async (req, res) => {
+  const { email } = req.body;
+
+  if (!email || typeof email !== "string" || !email.trim()) {
+    res.status(400).json({ error: "Email is required" });
+    return;
+  }
+
+  try {
+    const snapshot = await db
+      .collection("users")
+      .where("email", "==", email.toLowerCase().trim())
+      .limit(1)
+      .get();
+
+    res.json({ exists: !snapshot.empty });
+  } catch (error) {
+    console.error("Check email error:", error);
+    res.status(500).json({ error: "Failed to check email" });
+  }
+});
+
 // POST /api/auth/login
 router.post("/login", async (req, res) => {
   const { email, password } = req.body;
