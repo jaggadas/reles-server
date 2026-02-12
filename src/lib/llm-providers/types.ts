@@ -16,6 +16,17 @@ export interface ExtractionOutput {
   highlights?: string[];
 }
 
+export interface StreamEvent {
+  type: "metadata" | "ingredient" | "instruction" | "complete" | "error";
+  data: unknown;
+}
+
+export type StreamCallback = (event: StreamEvent) => void;
+
 export interface RecipeExtractor {
   extractRecipeFromTranscript(transcript: string): Promise<ExtractionOutput>;
+  extractRecipeFromTranscriptStream?(
+    transcript: string,
+    onEvent: StreamCallback
+  ): Promise<ExtractionOutput>;
 }

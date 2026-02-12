@@ -8,10 +8,12 @@ interface SerpApiResponse {
 interface SerpApiYouTubeVideoItem {
   link?: string;
   title?: string;
-  channel?: { name?: string };
+  channel?: { name?: string; thumbnail?: string };
   thumbnail?: string | { static?: string };
   /** Total view count for the video when available */
   views?: number;
+  /** Duration string, e.g. "9:28" or "1:02:15" */
+  length?: string;
 }
 
 interface SerpApiYouTubeSearchResponse {
@@ -21,6 +23,14 @@ interface SerpApiYouTubeSearchResponse {
 }
 
 const VIDEO_ID_REGEX = /(?:youtube\.com\/watch\?.*v=|youtu\.be\/)([a-zA-Z0-9_-]{11})/;
+
+function parseDurationSeconds(length: string | undefined): number {
+  if (!length) return 0;
+  const parts = length.split(":").map(Number);
+  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  if (parts.length === 2) return parts[0] * 60 + parts[1];
+  return parts[0] || 0;
+}
 
 function extractVideoIdFromLink(link: string): string | null {
   const match = link.match(VIDEO_ID_REGEX);
@@ -32,11 +42,17 @@ function parseVideoResult(item: SerpApiYouTubeVideoItem): VideoSearchResult | nu
   if (!link) return null;
   const videoId = extractVideoIdFromLink(link);
   if (!videoId) return null;
+
+  // Filter out Shorts / very short videos (< 3 minutes)
+  const durationSec = parseDurationSeconds(item.length);
+  if (durationSec > 0 && durationSec < 180) return null;
+
   const thumbnail = `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`;
   return {
     videoId,
     title: item.title ?? "Untitled",
     channelName: item.channel?.name ?? "",
+    channelThumbnail: item.channel?.thumbnail || undefined,
     thumbnail,
     url: link,
     viewCount: typeof item.views === "number" ? item.views : undefined,
@@ -54,9 +70,15 @@ export async function searchRecipeVideos(query: string): Promise<VideoSearchResu
   const url = new URL("https://serpapi.com/search.json");
   url.searchParams.set("engine", "youtube");
   url.searchParams.set("search_query", searchQuery);
+  url.searchParams.set("sp", "EgIoAQ%3D%3D"); // YouTube "Subtitles/CC" feature filter
   url.searchParams.set("api_key", apiKey);
 
+  console.log("[SerpApi] Searching for:", searchQuery);
+  console.log("[SerpApi] Using API key:", apiKey.slice(0, 8) + "...");
+
   const response = await fetch(url.toString());
+
+  console.log("[SerpApi] Response status:", response.status);
 
   if (!response.ok) {
     let body: Record<string, unknown> = {};
@@ -64,10 +86,10 @@ export async function searchRecipeVideos(query: string): Promise<VideoSearchResu
       body = await response.json();
     } catch {
       const text = await response.text();
-      console.error("SerpApi search error:", response.status, text);
+      console.error("[SerpApi] Search error (raw):", response.status, text);
     }
     const serpError = (body.error as string) || `HTTP ${response.status}`;
-    console.error("SerpApi search error:", response.status, serpError);
+    console.error("[SerpApi] Search error:", response.status, serpError);
 
     if (response.status === 429) {
       throw new Error("Rate limit exceeded");

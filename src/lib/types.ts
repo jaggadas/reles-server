@@ -73,6 +73,7 @@ export interface VideoSearchResult {
   videoId: string;
   title: string;
   channelName: string;
+  channelThumbnail?: string;
   thumbnail: string;
   url: string;
    /** Total view count when available from the provider */

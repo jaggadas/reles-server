@@ -31,6 +31,15 @@ export async function cacheRecipe(videoId: string, json: Record<string, unknown>
   await db.collection("recipe_cache").doc(videoId).set({
     videoId,
     extractedJson: json,
+    // Denormalized fields for efficient Firestore queries
+    title: (json.title as string) || "Untitled",
+    channelTitle: (json.channelTitle as string) || "",
+    cuisine: (json.cuisine as string) || "OTHER",
+    difficulty: (json.difficulty as number) || 0,
+    totalTimeMinutes:
+      ((json.prepTimeMinutes as number) || 0) +
+      ((json.cookTimeMinutes as number) || 0),
+    allergens: (json.allergens as string[]) || [],
     createdAt: now,
     timesAccessed: 1,
     timesMade: 0,
@@ -71,4 +80,175 @@ export async function getPopularRecipes(limit: number = 10) {
       timesAccessed: data.timesAccessed,
     };
   });
+}
+
+// ── Feed query helpers ──────────────────────────────────────
+
+export interface FeedRecipe {
+  videoId: string;
+  title: string;
+  channelTitle: string;
+  cuisine: string;
+  difficulty: number;
+  caloriesKcal: number;
+  cookTimeMinutes: number;
+  prepTimeMinutes: number;
+  totalTimeMinutes: number;
+  allergens: string[];
+  highlights: string[];
+  timesAccessed: number;
+  timesMade: number;
+}
+
+function docToFeedRecipe(doc: FirebaseFirestore.DocumentData): FeedRecipe {
+  const data = doc.data();
+  const json = (data.extractedJson || {}) as Record<string, unknown>;
+  return {
+    videoId: data.videoId,
+    title: data.title || (json.title as string) || "Untitled",
+    channelTitle: data.channelTitle || (json.channelTitle as string) || "",
+    cuisine: data.cuisine || (json.cuisine as string) || "OTHER",
+    difficulty: data.difficulty || (json.difficulty as number) || 0,
+    caloriesKcal: (json.caloriesKcal as number) || 0,
+    cookTimeMinutes: (json.cookTimeMinutes as number) || 0,
+    prepTimeMinutes: (json.prepTimeMinutes as number) || 0,
+    totalTimeMinutes:
+      data.totalTimeMinutes ||
+      ((json.prepTimeMinutes as number) || 0) +
+        ((json.cookTimeMinutes as number) || 0),
+    allergens: data.allergens || (json.allergens as string[]) || [],
+    highlights: (json.highlights as string[]) || [],
+    timesAccessed: data.timesAccessed || 0,
+    timesMade: data.timesMade || 0,
+  };
+}
+
+export async function getRecipesByCuisine(
+  cuisine: string,
+  limit: number = 4
+): Promise<FeedRecipe[]> {
+  try {
+    const snapshot = await db
+      .collection("recipe_cache")
+      .where("cuisine", "==", cuisine)
+      .orderBy("timesAccessed", "desc")
+      .limit(limit)
+      .get();
+
+    if (!snapshot.empty) {
+      return snapshot.docs.map(docToFeedRecipe);
+    }
+  } catch {
+    // Missing composite index — fall through to in-memory scan
+  }
+
+  const fallback = await db
+    .collection("recipe_cache")
+    .orderBy("timesAccessed", "desc")
+    .limit(limit * 5)
+    .get();
+
+  return fallback.docs
+    .map(docToFeedRecipe)
+    .filter((r) => r.cuisine === cuisine)
+    .slice(0, limit);
+}
+
+export async function getQuickRecipes(
+  excludeAllergens: string[],
+  limit: number = 6
+): Promise<FeedRecipe[]> {
+  try {
+    const snapshot = await db
+      .collection("recipe_cache")
+      .where("totalTimeMinutes", ">", 0)
+      .where("totalTimeMinutes", "<=", 30)
+      .orderBy("totalTimeMinutes", "asc")
+      .limit(limit * 3)
+      .get();
+
+    if (!snapshot.empty) {
+      return snapshot.docs
+        .map(docToFeedRecipe)
+        .filter((r) => {
+          if (excludeAllergens.length === 0) return true;
+          return !excludeAllergens.some((a) => r.allergens.includes(a));
+        })
+        .slice(0, limit);
+    }
+  } catch {
+    // Missing composite index — fall through to in-memory scan
+  }
+
+  const fallback = await db
+    .collection("recipe_cache")
+    .orderBy("timesAccessed", "desc")
+    .limit(50)
+    .get();
+
+  return fallback.docs
+    .map(docToFeedRecipe)
+    .filter((r) => r.totalTimeMinutes > 0 && r.totalTimeMinutes <= 30)
+    .filter((r) => {
+      if (excludeAllergens.length === 0) return true;
+      return !excludeAllergens.some((a) => r.allergens.includes(a));
+    })
+    .slice(0, limit);
+}
+
+export async function getChallengeRecipes(
+  cuisines: string[],
+  limit: number = 4
+): Promise<FeedRecipe[]> {
+  try {
+    const snapshot = await db
+      .collection("recipe_cache")
+      .where("difficulty", ">=", 3)
+      .orderBy("difficulty", "asc")
+      .orderBy("timesAccessed", "desc")
+      .limit(limit * 3)
+      .get();
+
+    if (!snapshot.empty) {
+      const recipes = snapshot.docs.map(docToFeedRecipe);
+      if (cuisines.length === 0) return recipes.slice(0, limit);
+      return recipes
+        .filter((r) => cuisines.includes(r.cuisine))
+        .slice(0, limit);
+    }
+  } catch {
+    // Missing composite index — fall through to in-memory scan
+  }
+
+  const fallback = await db
+    .collection("recipe_cache")
+    .orderBy("timesAccessed", "desc")
+    .limit(50)
+    .get();
+
+  return fallback.docs
+    .map(docToFeedRecipe)
+    .filter((r) => r.difficulty >= 3)
+    .filter((r) => cuisines.length === 0 || cuisines.includes(r.cuisine))
+    .slice(0, limit);
+}
+
+export async function getRecipesByCuisineDetailed(
+  cuisine: string,
+  limit: number = 4
+): Promise<FeedRecipe[]> {
+  // Same query as getRecipesByCuisine — FeedRecipe already has all detailed fields
+  return getRecipesByCuisine(cuisine, limit);
+}
+
+export async function getPopularFeedRecipes(
+  limit: number = 6
+): Promise<FeedRecipe[]> {
+  const snapshot = await db
+    .collection("recipe_cache")
+    .orderBy("timesAccessed", "desc")
+    .limit(limit)
+    .get();
+
+  return snapshot.docs.map(docToFeedRecipe);
 }

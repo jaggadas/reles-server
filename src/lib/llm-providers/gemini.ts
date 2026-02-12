@@ -1,8 +1,8 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { buildExtractionPrompt } from "../extraction-prompt";
-import type { ExtractionOutput, RecipeExtractor } from "./types";
+import type { ExtractionOutput, RecipeExtractor, StreamCallback } from "./types";
 
-const MODEL_ID = "gemini-3-flash-preview";
+const MODEL_ID = process.env.GEMINI_MODEL || "gemini-2.5-flash";
 
 function getApiKey(): string {
   const key =
@@ -48,11 +48,147 @@ function parseOutput(text: string): ExtractionOutput {
   };
 }
 
+// ── Incremental JSON field extraction ──────────────────────
+
+interface IncrementalState {
+  emittedScalars: Set<string>;
+  emittedIngredientCount: number;
+  emittedInstructionCount: number;
+}
+
+const SCALAR_PATTERNS: Array<{
+  key: string;
+  pattern: RegExp;
+  parse: (m: RegExpMatchArray) => unknown;
+}> = [
+  { key: "servings", pattern: /"servings"\s*:\s*(\d+)/, parse: (m) => Number(m[1]) },
+  { key: "prep_time_minutes", pattern: /"prep_time_minutes"\s*:\s*(\d+)/, parse: (m) => Number(m[1]) },
+  { key: "cook_time_minutes", pattern: /"cook_time_minutes"\s*:\s*(\d+)/, parse: (m) => Number(m[1]) },
+  { key: "calories_kcal", pattern: /"calories_kcal"\s*:\s*(\d+)/, parse: (m) => Number(m[1]) },
+  { key: "difficulty", pattern: /"difficulty"\s*:\s*(\d+)/, parse: (m) => Number(m[1]) },
+  { key: "cuisine", pattern: /"cuisine"\s*:\s*"([^"]+)"/, parse: (m) => m[1] },
+];
+
+function extractCompletedArrayItems(
+  buffer: string,
+  arrayKey: string
+): unknown[] {
+  // Find the array start
+  const keyPattern = new RegExp(`"${arrayKey}"\\s*:\\s*\\[`);
+  const keyMatch = keyPattern.exec(buffer);
+  if (!keyMatch) return [];
+
+  const arrayStart = keyMatch.index + keyMatch[0].length;
+  const items: unknown[] = [];
+
+  // Walk through the buffer character by character to find completed items
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  let itemStart = -1;
+
+  for (let i = arrayStart; i < buffer.length; i++) {
+    const ch = buffer[i];
+
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      // For string arrays (instructions), mark item start at opening quote
+      if (inString && depth === 0 && itemStart === -1) {
+        itemStart = i;
+      }
+      continue;
+    }
+    if (inString) continue;
+
+    if (ch === "{") {
+      if (depth === 0) itemStart = i;
+      depth++;
+    } else if (ch === "}") {
+      depth--;
+      if (depth === 0 && itemStart !== -1) {
+        const itemStr = buffer.slice(itemStart, i + 1);
+        try {
+          items.push(JSON.parse(itemStr));
+        } catch {
+          // incomplete item, skip
+        }
+        itemStart = -1;
+      }
+    } else if (ch === "]" && depth === 0) {
+      // Array closed — also catch any trailing string items
+      break;
+    }
+  }
+
+  // For string arrays, also extract quoted strings at depth 0
+  if (items.length === 0) {
+    const stringPattern = /(?:^|,)\s*"((?:[^"\\]|\\.)*)"\s*(?=,|])/g;
+    const arrayContent = buffer.slice(arrayStart);
+    let match;
+    while ((match = stringPattern.exec(arrayContent)) !== null) {
+      items.push(match[1].replace(/\\"/g, '"').replace(/\\n/g, "\n"));
+    }
+  }
+
+  return items;
+}
+
+function processChunk(
+  buffer: string,
+  state: IncrementalState,
+  onEvent: StreamCallback
+): void {
+  // Check scalar fields
+  for (const { key, pattern, parse } of SCALAR_PATTERNS) {
+    if (state.emittedScalars.has(key)) continue;
+    const match = pattern.exec(buffer);
+    if (match) {
+      state.emittedScalars.add(key);
+      onEvent({ type: "metadata", data: { [key]: parse(match) } });
+    }
+  }
+
+  // Check ingredients
+  const ingredients = extractCompletedArrayItems(buffer, "ingredients") as Array<{
+    name: string;
+    quantity: string;
+  }>;
+  for (let i = state.emittedIngredientCount; i < ingredients.length; i++) {
+    onEvent({ type: "ingredient", data: ingredients[i] });
+    state.emittedIngredientCount = i + 1;
+  }
+
+  // Check instructions
+  const instructions = extractCompletedArrayItems(buffer, "instructions") as string[];
+  for (let i = state.emittedInstructionCount; i < instructions.length; i++) {
+    onEvent({ type: "instruction", data: { index: i, text: instructions[i] } });
+    state.emittedInstructionCount = i + 1;
+  }
+}
+
+// ── Extractor ──────────────────────────────────────────────
+
+const GENERATION_CONFIG = {
+  responseMimeType: "application/json" as const,
+  temperature: 0.2,
+};
+
 export const geminiRecipeExtractor: RecipeExtractor = {
   async extractRecipeFromTranscript(transcript: string): Promise<ExtractionOutput> {
     const apiKey = getApiKey();
     const genAI = new GoogleGenerativeAI(apiKey);
-    const model = genAI.getGenerativeModel({ model: MODEL_ID });
+    const model = genAI.getGenerativeModel({
+      model: MODEL_ID,
+      generationConfig: GENERATION_CONFIG,
+    });
 
     const prompt = buildExtractionPrompt(transcript);
     const result = await model.generateContent(prompt);
@@ -68,5 +204,55 @@ export const geminiRecipeExtractor: RecipeExtractor = {
     }
 
     return parseOutput(text);
+  },
+
+  async extractRecipeFromTranscriptStream(
+    transcript: string,
+    onEvent: StreamCallback
+  ): Promise<ExtractionOutput> {
+    const apiKey = getApiKey();
+    const genAI = new GoogleGenerativeAI(apiKey);
+    const model = genAI.getGenerativeModel({
+      model: MODEL_ID,
+      generationConfig: GENERATION_CONFIG,
+    });
+
+    const prompt = buildExtractionPrompt(transcript);
+    const t0 = Date.now();
+    const result = await model.generateContentStream(prompt);
+
+    let buffer = "";
+    let chunkCount = 0;
+    let firstEventEmitted = false;
+    const state: IncrementalState = {
+      emittedScalars: new Set(),
+      emittedIngredientCount: 0,
+      emittedInstructionCount: 0,
+    };
+
+    for await (const chunk of result.stream) {
+      const text = chunk.text();
+      if (text) {
+        chunkCount++;
+        if (chunkCount === 1) {
+          console.log(`[gemini-stream] first chunk at ${Date.now() - t0}ms`);
+        }
+        buffer += text;
+        const prevScalars = state.emittedScalars.size;
+        const prevIngredients = state.emittedIngredientCount;
+        processChunk(buffer, state, onEvent);
+        if (!firstEventEmitted && (state.emittedScalars.size > prevScalars || state.emittedIngredientCount > prevIngredients)) {
+          firstEventEmitted = true;
+          console.log(`[gemini-stream] first data event at ${Date.now() - t0}ms (chunk #${chunkCount}, buffer ${buffer.length} chars)`);
+        }
+      }
+    }
+
+    console.log(`[gemini-stream] done: ${chunkCount} chunks, ${buffer.length} chars, ${Date.now() - t0}ms`);
+
+    // Parse the final complete response
+    const finalOutput = parseOutput(buffer);
+    onEvent({ type: "complete", data: finalOutput });
+    return finalOutput;
   },
 };

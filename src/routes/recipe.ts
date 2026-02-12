@@ -1,6 +1,16 @@
 import { Router } from "express";
 import { getComposioClient } from "../lib/composio";
-import { incrementTimesMade, getPopularRecipes } from "../lib/firestore-cache";
+import {
+  incrementTimesMade,
+  getPopularRecipes,
+  getRecipesByCuisine,
+  getQuickRecipes,
+  getChallengeRecipes,
+  getRecipesByCuisineDetailed,
+  getPopularFeedRecipes,
+} from "../lib/firestore-cache";
+import { searchRecipeVideos } from "../lib/serpapi";
+import type { VideoSearchResult } from "../lib/types";
 
 interface IngredientInput {
   name: string;
@@ -196,6 +206,159 @@ router.get("/popular", async (req, res) => {
   } catch (error) {
     console.error("Get popular recipes error:", error);
     res.status(500).json({ error: "Failed to fetch popular recipes" });
+  }
+});
+
+// ── Feed endpoint ───────────────────────────────────────────
+
+// Simple in-memory cache for YouTube search results (30-min TTL)
+const searchCache = new Map<string, { data: VideoSearchResult[]; expiresAt: number }>();
+const SEARCH_CACHE_TTL = 30 * 60 * 1000;
+
+function getCachedSearch(key: string): VideoSearchResult[] | null {
+  const entry = searchCache.get(key);
+  if (!entry || Date.now() > entry.expiresAt) {
+    searchCache.delete(key);
+    return null;
+  }
+  return entry.data;
+}
+
+function setCachedSearch(key: string, data: VideoSearchResult[]): void {
+  searchCache.set(key, { data, expiresAt: Date.now() + SEARCH_CACHE_TTL });
+}
+
+function buildPickedForYouQueries(
+  cuisines: string[],
+  dietary: string,
+  maxQueries: number
+): string[] {
+  const dietPrefix =
+    dietary === "vegan" ? "vegan" : dietary === "vegetarian" ? "vegetarian" : "";
+  const queries: string[] = [];
+
+  const shuffled = [...cuisines].sort(() => Math.random() - 0.5);
+  for (let i = 0; i < Math.min(maxQueries, shuffled.length); i++) {
+    const cuisineName = shuffled[i].toLowerCase().replace(/_/g, " ");
+    queries.push(`${dietPrefix} ${cuisineName}`.trim());
+  }
+
+  // Fallback if no cuisines selected
+  if (queries.length === 0) {
+    queries.push(`${dietPrefix} easy dinner`.trim());
+  }
+
+  return queries;
+}
+
+// GET /api/recipe/feed
+router.get("/feed", async (req, res) => {
+  try {
+    const cuisinesParam = (req.query.cuisines as string) || "";
+    const dietary = (req.query.dietary as string) || "none";
+    const allergensParam = (req.query.allergens as string) || "";
+
+    const cuisines = cuisinesParam ? cuisinesParam.split(",").filter(Boolean).map((c) => c.toUpperCase()) : [];
+    const allergens = allergensParam
+      ? allergensParam.split(",").map((a) => a.toLowerCase().trim()).filter(Boolean)
+      : [];
+
+    // Pick random cuisines for trending and deep dive sections
+    const shuffledCuisines = [...cuisines].sort(() => Math.random() - 0.5);
+    const trendingCuisine = shuffledCuisines[0] || null;
+    const deepDiveCuisine = shuffledCuisines[1] || shuffledCuisines[0] || null;
+
+    // Run Firestore queries in parallel
+    let [trendingRecipes, quickTonightRecipes, deepDiveRecipes, challengeRecipes] =
+      await Promise.all([
+        trendingCuisine ? getRecipesByCuisine(trendingCuisine, 4) : Promise.resolve([]),
+        getQuickRecipes(allergens, 6),
+        deepDiveCuisine
+          ? getRecipesByCuisineDetailed(deepDiveCuisine, 4)
+          : Promise.resolve([]),
+        getChallengeRecipes(cuisines, 4),
+      ]);
+
+    // Fallback: if cuisine-specific sections are empty, populate from popular recipes
+    // so the homepage isn't barren for users with sparse cache data
+    let effectiveTrendingCuisine = trendingCuisine;
+    let effectiveDeepDiveCuisine = deepDiveCuisine;
+
+    if (
+      trendingRecipes.length === 0 &&
+      quickTonightRecipes.length === 0 &&
+      deepDiveRecipes.length === 0
+    ) {
+      const popular = await getPopularFeedRecipes(8);
+      if (popular.length > 0) {
+        // Use popular recipes for Quick Tonight (most universally useful)
+        quickTonightRecipes = popular.slice(0, 6);
+
+        // Group remaining by cuisine for trending/deep dive
+        const cuisineSet = new Set(cuisines);
+        const byCuisine = new Map<string, typeof popular>();
+        for (const r of popular) {
+          if (r.cuisine === "OTHER") continue;
+          // Only use cuisines the user has selected (if they have preferences)
+          if (cuisineSet.size > 0 && !cuisineSet.has(r.cuisine)) continue;
+          const existing = byCuisine.get(r.cuisine) || [];
+          existing.push(r);
+          byCuisine.set(r.cuisine, existing);
+        }
+
+        // Pick the most common cuisine for trending
+        const sorted = [...byCuisine.entries()].sort(
+          (a, b) => b[1].length - a[1].length
+        );
+        if (sorted.length > 0) {
+          effectiveTrendingCuisine = sorted[0][0];
+          trendingRecipes = sorted[0][1].slice(0, 4);
+        }
+        if (sorted.length > 1) {
+          effectiveDeepDiveCuisine = sorted[1][0];
+          deepDiveRecipes = sorted[1][1].slice(0, 4);
+        }
+      }
+    }
+
+    // YouTube searches for "Picked For You" — run sequentially to respect rate limits
+    const pickedForYouQueries = buildPickedForYouQueries(cuisines, dietary, 2);
+    const pickedForYouVideos: VideoSearchResult[] = [];
+
+    for (const query of pickedForYouQueries) {
+      // Check cache first
+      const cached = getCachedSearch(query);
+      if (cached) {
+        pickedForYouVideos.push(...cached.slice(0, 4));
+        continue;
+      }
+
+      try {
+        const results = await searchRecipeVideos(query);
+        setCachedSearch(query, results);
+        pickedForYouVideos.push(...results.slice(0, 4));
+      } catch (err) {
+        console.error("Picked-for-you search failed:", query, err);
+        // Continue — partial data is fine
+      }
+    }
+
+    res.json({
+      pickedForYou: pickedForYouVideos,
+      trending: {
+        cuisine: effectiveTrendingCuisine,
+        recipes: trendingRecipes,
+      },
+      quickTonight: quickTonightRecipes,
+      deepDive: {
+        cuisine: effectiveDeepDiveCuisine,
+        recipes: deepDiveRecipes,
+      },
+      challenge: challengeRecipes,
+    });
+  } catch (error) {
+    console.error("Feed endpoint error:", error);
+    res.status(500).json({ error: "Failed to fetch homepage feed" });
   }
 });
 

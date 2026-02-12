@@ -6,7 +6,7 @@ import type { AuthRequest, UserDocument } from "../lib/auth-types";
 const router = Router();
 
 const FREE_WEEKLY_LIMIT = 2;
-const PRO_WEEKLY_LIMIT = 10;
+const PRO_WEEKLY_LIMIT = 50;
 const TRIAL_RECIPE_LIMIT = 10;
 const TRIAL_DURATION_DAYS = 7;
 
