@@ -252,3 +252,31 @@ export async function getPopularFeedRecipes(
 
   return snapshot.docs.map(docToFeedRecipe);
 }
+
+// ── User saved-recipes helpers ────────────────────────────────
+
+export async function getRecipeCacheDoc(
+  videoId: string
+): Promise<Record<string, unknown> | null> {
+  const doc = await db.collection("recipe_cache").doc(videoId).get();
+  if (!doc.exists) return null;
+  return (doc.data() as CachedRecipe).extractedJson;
+}
+
+export async function getRecipeCacheBatch(
+  videoIds: string[]
+): Promise<Map<string, Record<string, unknown>>> {
+  if (videoIds.length === 0) return new Map();
+
+  const refs = videoIds.map((id) => db.collection("recipe_cache").doc(id));
+  const docs = await db.getAll(...refs);
+
+  const result = new Map<string, Record<string, unknown>>();
+  for (const doc of docs) {
+    if (doc.exists) {
+      const data = doc.data() as CachedRecipe;
+      result.set(doc.id, data.extractedJson);
+    }
+  }
+  return result;
+}
