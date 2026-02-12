@@ -19,11 +19,6 @@ export interface UserProfile {
   createdAt: string;
 }
 
-export interface TrialData {
-  startDate: string; // ISO timestamp of when trial was activated
-  recipesUsed: number;
-}
-
 export interface WeeklyExtractionData {
   count: number;
   weekStart: string; // ISO Monday 00:00:00 UTC
@@ -35,7 +30,8 @@ export interface UserDocument {
   name: string;
   passwordHash: string;
   preferences: UserPreferences | null;
-  trial: TrialData | null;
+  isPro: boolean;
+  recipesUsed: number; // lifetime total for free-tier tracking
   weeklyExtractions: WeeklyExtractionData;
   createdAt: string;
   updatedAt: string;
